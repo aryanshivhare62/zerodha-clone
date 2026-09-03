@@ -3,12 +3,14 @@ require("dotenv").config();
 const express = require("express");
 const pool = require("./config/db");
 const authRoutes = require("./routes/authRoutes");
+const stockRoutes = require("./routes/stockRoutes");
 const authMiddleware = require("./middleware/authMiddleware");
 
 const app = express();
 
 app.use(express.json());
 app.use("/api/auth", authRoutes);
+app.use("/api/stocks", stockRoutes);
 
 app.get("/", (req, res) => {
   res.send("Zerodha Clone API is running");
