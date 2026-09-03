@@ -194,10 +194,45 @@ const removeStockFromWatchlist = async (req, res) => {
     }
 };
 
+// DELETE /api/watchlists/:watchlistId
+const deleteWatchlist = async (req, res) => {
+    try {
+        const { watchlistId } = req.params;
+        const userId = req.user.userId;
+
+        const result = await pool.query(
+            `DELETE FROM watchlists
+             WHERE id = $1
+             AND user_id = $2
+             RETURNING *`,
+            [watchlistId, userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                message: "Watchlist not found"
+            });
+        }
+
+        res.status(200).json({
+            message: "Watchlist deleted successfully",
+            watchlist: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            message: "Server error"
+        });
+    }
+};
+
 module.exports = {
     createWatchlist,
     getWatchlists,
     addStockToWatchlist,
     getWatchlistStocks,
-    removeStockFromWatchlist
+    removeStockFromWatchlist,
+    deleteWatchlist
 };
