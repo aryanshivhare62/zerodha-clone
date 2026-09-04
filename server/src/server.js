@@ -7,6 +7,7 @@ const stockRoutes = require("./routes/stockRoutes");
 const watchlistRoutes = require("./routes/watchlistRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const tradeRoutes = require("./routes/tradeRoutes");
+const holdingRoutes = require("./routes/holdingRoutes");
 const authMiddleware = require("./middleware/authMiddleware");
 
 const app = express();
@@ -17,6 +18,7 @@ app.use("/api/stocks", stockRoutes);
 app.use("/api/watchlists", watchlistRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/trades", tradeRoutes);
+app.use("/api/holdings", holdingRoutes);
 
 app.get("/", (req, res) => {
   res.send("Zerodha Clone API is running");

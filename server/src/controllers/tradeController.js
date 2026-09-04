@@ -1,6 +1,8 @@
 const pool = require("../config/db");
 
 const executeTrade = async (req, res) => {
+    const client = await pool.connect();
+
     try {
         const { order_id } = req.body;
         const userId = req.user.userId;
@@ -11,8 +13,8 @@ const executeTrade = async (req, res) => {
             });
         }
 
-        // 1. Get pending order
-        const orderResult = await pool.query(
+        // Get pending order
+        const orderResult = await client.query(
             `SELECT *
              FROM orders
              WHERE id = $1
@@ -29,8 +31,119 @@ const executeTrade = async (req, res) => {
 
         const order = orderResult.rows[0];
 
-        // 2. Create trade
-        const tradeResult = await pool.query(
+        // Start transaction
+        await client.query("BEGIN");
+
+        // Calculate total order value
+        const totalAmount = Number(order.price) * Number(order.quantity);
+
+        // Get user's funds
+        const fundsResult = await client.query(
+            `SELECT available_balance
+             FROM funds
+             WHERE user_id = $1
+             FOR UPDATE`,
+            [userId]
+        );
+
+        if (fundsResult.rows.length === 0) {
+            throw new Error("Funds account not found");
+        }
+
+        const availableBalance = Number(
+            fundsResult.rows[0].available_balance
+        );
+
+        // Check balance for BUY
+        if (order.type === "BUY" && availableBalance < totalAmount) {
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+                message: "Insufficient funds"
+            });
+        }
+
+        // Check existing holding
+        const holdingResult = await client.query(
+            `SELECT quantity, average_price
+             FROM holdings
+             WHERE user_id = $1
+             AND stock_id = $2
+             FOR UPDATE`,
+            [userId, order.stock_id]
+        );
+
+        if (order.type === "BUY") {
+            await client.query(
+                `UPDATE funds
+                 SET available_balance = available_balance - $1,
+                 used_balance = used_balance + $1,
+                 updated_at = CURRENT_TIMESTAMP
+                 WHERE user_id = $2`,
+                [totalAmount, userId]
+            );
+        }
+
+        if (order.type === "SELL") {
+            if (holdingResult.rows.length === 0) {
+                await client.query("ROLLBACK");
+
+                return res.status(400).json({
+                    message: "You do not own this stock"
+                });
+            }
+
+            const holding = holdingResult.rows[0];
+
+            const currentQuantity = Number(holding.quantity);
+            const sellQuantity = Number(order.quantity);
+
+            if (currentQuantity < sellQuantity) {
+                await client.query("ROLLBACK");
+
+                return res.status(400).json({
+                    message: "Insufficient shares"
+                });
+            }
+
+            const remainingQuantity = currentQuantity - sellQuantity;
+
+            if (remainingQuantity === 0) {
+                // All shares sold
+                await client.query(
+                    `DELETE FROM holdings
+                     WHERE user_id = $1
+                     AND stock_id = $2`,
+                    [userId, order.stock_id]
+                );
+            } else {
+                // Reduce holding quantity
+                await client.query(
+                    `UPDATE holdings
+                     SET quantity = $1,
+                     updated_at = CURRENT_TIMESTAMP
+                     WHERE user_id = $2
+                     AND stock_id = $3`,
+                    [
+                        remainingQuantity,
+                        userId,
+                        order.stock_id
+                    ]
+                );
+            }
+
+            // Add received money to available balance
+            await client.query(
+                `UPDATE funds
+                 SET available_balance = available_balance + $1,
+                 updated_at = CURRENT_TIMESTAMP
+                 WHERE user_id = $2`,
+                [totalAmount, userId]
+            );
+        }
+
+        // Create trade
+        const tradeResult = await client.query(
             `INSERT INTO trades
              (order_id, user_id, stock_id, quantity, price)
              VALUES ($1, $2, $3, $4, $5)
@@ -44,13 +157,66 @@ const executeTrade = async (req, res) => {
             ]
         );
 
-        // 3. Mark order as completed
-        await pool.query(
+        if (order.type === "BUY") {
+
+            if (holdingResult.rows.length === 0) {
+
+                // First time buying this stock
+                await client.query(
+                    `INSERT INTO holdings
+                     (user_id, stock_id, quantity, average_price)
+                     VALUES ($1, $2, $3, $4)`,
+                    [
+                        userId,
+                        order.stock_id,
+                        order.quantity,
+                        order.price
+                    ]
+                );
+
+            } else {
+
+                // Existing holding
+                const holding = holdingResult.rows[0];
+
+                const oldQuantity = Number(holding.quantity);
+                const oldAveragePrice = Number(holding.average_price);
+
+                const newQuantity = oldQuantity + Number(order.quantity);
+
+                const newAveragePrice =
+                    (
+                        (oldQuantity * oldAveragePrice) +
+                        (Number(order.quantity) * Number(order.price))
+                    ) / newQuantity;
+
+                await client.query(
+                    `UPDATE holdings
+                     SET quantity = $1,
+                     average_price = $2,
+                     updated_at = CURRENT_TIMESTAMP
+                     WHERE user_id = $3
+                     AND stock_id = $4`,
+                    [
+                        newQuantity,
+                        newAveragePrice,
+                        userId,
+                        order.stock_id
+                    ]
+                );
+            }
+        }
+
+        // Mark order as completed
+        await client.query(
             `UPDATE orders
              SET status = 'COMPLETED'
              WHERE id = $1`,
             [order.id]
         );
+
+        // Commit transaction
+        await client.query("COMMIT");
 
         res.status(201).json({
             message: "Trade executed successfully",
@@ -58,16 +224,21 @@ const executeTrade = async (req, res) => {
         });
 
     } catch (error) {
+        await client.query("ROLLBACK");
+
         console.error(error);
 
         res.status(500).json({
-            message: "Server error"
+            message: "Trade execution failed"
         });
+
+    } finally {
+        client.release();
     }
 };
 
 const getTrades = async (req, res) => {
-    try{
+    try {
         const userId = req.user.userId;
 
         const result = await pool.query(
@@ -93,7 +264,7 @@ const getTrades = async (req, res) => {
             trades: result.rows
         })
 
-    }catch (error) {
+    } catch (error) {
         console.log(error);
 
         res.status(500).json({
